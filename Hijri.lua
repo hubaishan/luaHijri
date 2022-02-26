@@ -1,6 +1,6 @@
 --[[--------------- luaHijri---------------------
 by hubaishan
-v0.3
+v0.4
 locate at https://github.com/hubaishan/luaHijri
 
 ]]
@@ -272,18 +272,18 @@ end
 --[[--- Unix and wday---]]
 
 local function jd2unix(jd)
-	local uday = jd - 2440588 -- J.D. of 1.1.1970 
-
-	if (uday < 0 ) or (uday > 24755) then  -- before beginning of unix epoch or behind end of unix epoch
-		return nil;
+	-- 2440588 -- J.D. of 1.1.1970
+	if jd == nil then
+		return nil
 	end
-	return (uday * 24 * 3600)
+	return ((jd - 2440588) * 24 * 3600)
 end
 
 local function unix2jd(unix)
-	local jd= floor(unix/(24 * 3600))
-	jd = jd + 2440588
-	return jd
+	if unix == nil then
+		return nil
+	end
+	return floor(unix/(24 * 3600)) + 2440588
 end
 
 --returns wday number sunday=wday_sunday
@@ -460,13 +460,14 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 		type = false,
 		mode = true,
 		jd  = false,
+		timestamp = false,
 		year = true,
 		month = true,
 		day = true,
 		wday = true,
 		yday = true,
 		month_days = true,
-		leap_year  = true,
+		leap_year  = true
 		}
 	c.metatable = m
     c.properties = p
@@ -486,18 +487,57 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 		p.wday, p.month_days, p.leap_year  = nil, nil, nil
 	end
 
+	function get_jd()
+		if p.jd ~= nil then
+			return p.jd
+		elseif p.year and p.month and p.day then
+			p.set_date(p.year,p.month,p.day)
+		else
+			local t=os.date("*t")
+			if p.type=='gregorian' then
+				p.year, p.month, p.day, p.wday, p.yday = t.year, t.month, t.day, t.wday - 1 + wday_sunday, t.yday
+				p.jd = gregorian2jd(p.year, p.month, p.day)
+			else
+				p.from_gregorian(t.year,t.month,t.day)
+				p.wday = t.wday -1 + wday_sunday
+			end
+		end
+		return p.jd
+	end
+
+	function p.set_timestamp(arg_tm)
+		if p.timestamp == arg_tm then
+			return
+		end
+		p.timestamp = arg_tm
+		p.set_jd(unix2jd(arg_tm))
+	end
+
+    -- adjust type of western calendar
+	function adj_type(type,year,month,day)
+		if type == 'western' then
+			if year>gregorian_epoch.y or (year==gregorian_epoch.y and month>gregorian_epoch.m) or (year==gregorian_epoch.y and month == gregorian_epoch.m and day>=gregorian_epoch.d) then
+				type='gregorian'
+			else
+				type = 'julian'
+			end
+		end
+		return type
+	end
+
 	-- Check the Date
 	function check_date(year,month,day,may_adjusted)
+		local type =adj_type(p.type,year,month,day)
 		if month <1 or month >12 or day <1 or day >31 then
 			return false
-		elseif p.type == 'hijri' then
+		elseif type == 'hijri' then
 			if day > 30 or (not may_adjusted and day> hijri_days_in_month(year,month,p.mode)) then
 				return false
 			end
 		elseif day > select(month,31,29,31,30,31,30,31,31,30,31,30,31) then 
 			return false
 		elseif month == 2 and day == 29 then
-			if (((year % 4) ~= 0) or ((p.type == 'gregorian' or (p.type == 'western' and arg_jd >= gregorian_epoch.jd ) ) and (year % 100) == 0 and (year % 400) ~= 0)) then
+			if (((year % 4) ~= 0) or (type == 'gregorian'  and (year % 100) == 0 and (year % 400) ~= 0)) then
 				return false
 			end
 		end
@@ -510,11 +550,12 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 		if not check_date(year,month,day,may_adjusted) then
 			error("Invalid Date")
 		end
-		if p.type == 'hijri' then
+		local type=adj_type(p.type,year,month,day)
+		if type == 'hijri' then
 			p.jd = hijri2jd(year,month,day,p.mode)
-		elseif p.type == 'gregorian' or (p.type == 'western' and arg_jd >= gregorian_epoch.jd ) then
+		elseif type == 'gregorian' then
 			p.jd = gregorian2jd(year,month,day)
-		elseif p.type == 'julian' or (p.type == 'western' and arg_jd < gregorian_epoch.jd ) then
+		elseif type == 'julian' then
 			p.jd = julian2jd(year,month,day)
 		end
 		p.year, p.month, p.day = year,month,day
@@ -523,16 +564,28 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 
 	-- Convert date from hijri
 	function p.from_hijri(year,month,day,wday,mode)
+		mode = mode or p.mode
 		local jd = hijri2jd(year,month,day,mode)
 		if wday and wday <= 6 and wday >=0 then
 			local jd_weekday = jd2wday(jd)
-			if math.abs(jd_weekday-wday)<3 then
-				jd=jd + (wday - jd_weekday)
+			local differ = wday - jd_weekday
+
+			if differ < - 4 then
+				jd = jd + (differ + 7)
+			elseif differ > -3 and differ < 3 then
+				jd = jd + differ
+			elseif differ > 4 then
+				jd = jd + (differ - 7)
 			else
 				error("Weekday is very far from Hijri date")
 			end
 		end
-		p.set_jd(jd)
+		if p.type=='hijri' and check_date(year,month,day,true) then
+			p.year,p.month,p.day,p.jd=year,month,day,jd
+			p.wday, p.month_days, p.leap_year, p.yday  = nil, nil, nil, nil
+		else
+			p.set_jd(jd)
+		end
 	end
 
 	-- Convert date from Gregorian
@@ -555,8 +608,11 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 
 	-- internal function
 	function set_value(key)
+		local jd = get_jd() -- to init calendar if not
 		if key=='wday' then
-			p.wday = jd2wday(p.jd)
+			p.wday = jd2wday(jd)
+		elseif key == 'timestamp' then
+			p.timestamp = jd2unix(jd)
 		else
 			if p.type=='hijri' and key=='leap_year' then
 				p.leap_year = hijri_isleap(p.year,p.mode)
@@ -593,26 +649,28 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 
 	-- set type of calendar
 	function p.set_type(arg_type)
-		local old_type = p.type
+		local new_type,new_mode
 		arg_type = string.lower(arg_type)
-		if old_type and old_type == arg_type then
-			return
-		end
 		if in_array(arg_type, {'hijri', 'hijri_adjusted_umalqura', 'hijri_umalqura', 'hijri_tabular', 'gregorian', 'julian', 'western'}) then
 			if string.sub(arg_type,1,5) == 'hijri' then
-				p.type = 'hijri'
+				new_type = 'hijri'
 				if arg_type == 'hijri_umalqura' then
-					p.mode = 2
+					new_mode = 2
 				elseif arg_type == 'hijri_tabular' then
-					p.mode = 0
+					new_mode = 0
 				else
-					p.mode = 1
+					new_mode = 1
 				end
 			else
-				p.type = arg_type
+				new_type = arg_type
 			end
-			if p.jd then
-				p.set_jd(p.jd) 
+
+			if new_type ~= p.type or new_mode ~= p.mode then
+				p.type = new_type
+				p.mode = new_mode
+				if p.jd then
+					p.set_jd(p.jd) 
+				end
 			end
 		else
 			error('bad calendar type')
@@ -622,16 +680,16 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 	-- add interval to date
 	function p.add(y, m, d)
 		y,m,d = tonumber(y) or 0,tonumber(m) or 0,tonumber(d) or 0
-		local jd
+		local jd = get_jd()
 		if y==0 and m == 0 then
-			jd = p.jd + d
+			jd = jd + d
 		else
 			local year,month,day=p.year + y, p.month + m, p.day + d
 			if p.type == 'hijri' then
 				jd = hijri2jd(year,month,day,p.mode)
-			elseif p.type == 'gregorian' or (p.type == 'western' and p.jd >= gregorian_epoch.jd ) then
+			elseif p.type == 'gregorian' then
 				jd = gregorian2jd(year,month,day)
-			elseif p.type == 'julian' or (p.type == 'western' and p.jd < gregorian_epoch.jd ) then
+			elseif p.type == 'julian' then
 				jd = julian2jd(year,month,day)
 			elseif p.type == 'western' then
 				if p.jd >= gregorian_epoch.jd then
@@ -652,6 +710,24 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 			p.set_jd(jd)
 		end
 	end
+
+	function p.iso()
+		local ret,str,jd = '','', get_jd()
+		local year,month,day
+
+		if p.type=='gregorian' then
+			year,month,day = p.year,p.month,p.day
+		else
+			year,month,day = jd2gregorian(jd)
+		end
+
+		if year<0 then 
+			year=year-1
+			ret = '-'
+		end
+		str=tostring(math.abs(year))
+		return ret .. string.rep('0', 4 - #str) .. str .. '-' .. ((month<10) and '0' or '') .. month .. '-' .. ((day<10) and '0' or '') .. day
+	end
 	-- process argument
 	p.set_type(arg_type)
 
@@ -659,19 +735,11 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 		p.set_date(arg_jd, arg_month, arg_day)
 	elseif arg_jd then
 		p.set_jd(arg_jd)
-	else
-		local t=os.date("*t")
-		if p.type=='gregorian' then
-			p.year, p.month, p.day, p.wday, p.yday = t.year, t.month, t.day, t.wday, t.yday
-		else
-			p.from_gregorian(t.year,t.month,t.day)
-			p.wday = t.wday + wday_sunday
-		end
 	end
-	
+
 	-- metatable functions
 	function m:__index(key)
-		if rop[key] and p[key] == nil then
+		if rop[key] ~= nil and p[key] == nil then
 			set_value(key)
 		end
         local prop = p[key]
@@ -692,6 +760,8 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 			c.set_jd(value)
         elseif key == 'type' then
 			c.set_type(value)
+        elseif key == 'timestamp' then
+			c.set_timestamp(value)
 		else
             rawset(self, key, value)
         end
@@ -707,7 +777,7 @@ local function Date(arg_type, arg_jd, arg_month, arg_day)
 
 	setmetatable(c, m)
 	return c
- end
+end
 
 return {
 	gregorian2jd = gregorian2jd,
@@ -731,5 +801,7 @@ return {
 	gregorian2hijri = gregorian2hijri,
 	hijri2gregorian = hijri2gregorian,
 	Date = Date,
-	hijri_check = hijri_check
+	hijri_check = hijri_check,
+	gre_check = gre_check,
+	julian_check = julian_check
 }
